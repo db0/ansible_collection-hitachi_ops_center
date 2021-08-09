@@ -1,0 +1,23 @@
+---
+
+- name: Get all available nodes
+  uri:
+    url: "{{ base_uri }}"
+    validate_certs: no
+    force_basic_auth: yes
+  register: all_nodes
+  check_mode: no
+
+
+- name: Discover arrays in which host/cluster is zoned
+  include_tasks: lookup.yml
+  vars:
+    array_id: "{{ node_item.storageDeviceId }}"
+    srn: "{{ node_item.serialNumber }}"
+  loop: "{{ all_nodes.json.data }}"
+  loop_control:
+    loop_var: node_item
+    label: "{{ node_item.storageDeviceId }}"
+  when:
+  - (LIMIT_ARRAYS is not defined) 
+    or (LIMIT_ARRAYS is defined and node_item.storageDeviceId in LIMIT_ARRAYS) # DEBUG/Testing

@@ -1,0 +1,42 @@
+---
+
+# We try for 1 hour, every 30 seconds, to find the resource group we need unlocked
+- name: Check if resource group is already locked
+  uri:
+    timeout: 300
+    validate_certs: no
+    force_basic_auth: yes
+    # We retrieve only the pordIds to try and shorten the retrieval time, since we cannot use cache here.
+    url: "{{ base_uri }}/{{ array_details.storage_array }}/resource-groups?lockStatus=Locked&attributes=portIds"
+    body_format: json
+    headers:
+      Authorization: "Session {{ array_details.existing_token }}"
+      Content-Length: 0
+  register: locked_rgs
+  check_mode: no
+  until: 
+  - locked_rgs is success
+  - not locked_rgs.json.data | db0.hitachi_ops_center.is_resource_group_locked(array_details.resource_group | default(-1))
+  retries: 120
+  delay: 30
+
+# Once we find the resource group unlocked, we immediately lock it, for 2 hours
+# We use such a long timeout to avoid finding the RG in the other pair 
+# locked and having to wait 1 hour again until we can lock that one as well  .
+# The lock will anyway be removed once the session ends.
+- name: Lock Resource Groups
+  include_role:
+    name: job_uri
+  vars:
+    # The RG lock URI is a bit special
+    full_uri: "{{ service_uri }}/{{ array_details.storage_array }}/services/resource-group-service/actions/lock/invoke"
+    uri_auth_token: "{{ array_details.existing_token }}"
+    uri_method: POST
+    uri_body:
+      parameters: 
+        waitTime: 120
+    task_description: resource group lock
+    job_wait_retries: 60
+    job_wait_delay: 5
+  # This switch allows us to check for locks, without taking the lock as well.
+  when: not check_for_lock_only | default(false) | bool

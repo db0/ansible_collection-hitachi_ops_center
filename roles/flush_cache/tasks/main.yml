@@ -1,0 +1,15 @@
+---
+
+- name: Find all cache files
+  find:
+    paths: "{{ cache_dir }}"
+    patterns: "{{ pattern | default(omit) }}"
+  register: cache_files
+  
+- name: flush specified cache files
+  file:
+    path: "{{ item.path}}"
+    state: absent
+  loop: "{{ cache_files.files }}"
+  loop_control:
+    label: "{{ item.path }}"

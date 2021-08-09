@@ -1,0 +1,31 @@
+---
+
+- name: Get all args of the playbook process
+  shell: pstree -spal $PPID | grep ansible-playbook
+  register: cmd_args
+  delegate_to: localhost
+  check_mode: no
+  changed_when: false
+
+
+- name: Prepare keepalive command-line arguments
+  set_fact:
+    ka_args: "{{ cmd_args.stdout_lines[0] | db0.hitachi_ops_center.extract_ansible_playbook_process_info }}"
+
+
+- name: Start keepalive
+  shell: |
+    while kill -0 {{ ka_args.pid | int }}; do
+    {{ ka_args.cmd }} -i {{ inventory_hostname }}, {{ ka_args.auth }} {{ role_path }}/tasks/keep-alive-session.yml -e a_verbosity={{ ansible_verbosity }};
+    sleep 60;
+    done
+  environment:
+    ARRAY: "{{ array_id }}"
+    SESSION: "{{ session_id }}"
+    TOKEN: "{{ auth_token }}"
+    APID: "{{ ka_args.pid }}"
+  async: 7200
+  poll: 0
+  check_mode: no
+  delegate_to: localhost
+

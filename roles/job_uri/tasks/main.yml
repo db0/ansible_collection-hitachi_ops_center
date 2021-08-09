@@ -1,0 +1,66 @@
+---
+
+# Workaround until we can work with RG locks during a GAD run.
+# This will make the whole play way slower than it needs to be
+# Until then, this can only be called within an "array_details" loop
+- name: Wait until resource group is unlocked
+  include_role:
+    name: lock_resource_groups
+  vars:
+    check_for_lock_only: true
+  when: 
+  - ensure_unlocked | default(false) | bool
+  - not ansible_check_mode
+
+- name: Initiate job
+  uri:
+    timeout: "{{ timeout | default(omit) }}"
+    validate_certs: no
+    force_basic_auth: yes
+    url: "{{ full_uri }}"
+    body_format: json
+    body: "{{ uri_body }}"
+    method: "{{ uri_method }}"
+    status_code: 202
+    headers:
+      Authorization: "Session {{ uri_auth_token }}"
+      Remote-Authorization: "Session {{ uri_remote_auth_token | default(omit) }}"
+      # The default value sent by ansible apparently causes G700 arrays to abort.
+      # but sending 0 works
+  register: job_init_result
+  until: job_init_result is success
+  retries: 3
+  delay: 1
+
+- name: Get job status
+  uri:
+    validate_certs: no
+    force_basic_auth: yes
+    url: "https://{{ inventory_hostname }}:23451{{ job_init_result.json.self }}"
+    body_format: json
+    headers:
+      Authorization: "Session {{ uri_auth_token }}"
+      Content-Length: 0
+  register: job_result
+  until:
+  - job_result is success
+  - job_result.json.status == "Completed"
+  retries: "{{ job_wait_retries | default(10) }}"
+  delay: "{{ job_wait_delay | default(1) }}"
+  # To avoid ansible aborting because the job_result is not set due to check_mode
+  when: not ansible_check_mode
+
+- name: Show failing job log
+  debug:
+    var: job_result.json
+  when: 
+  - not ansible_check_mode
+  - job_result.json.state != "Succeeded"
+
+- name: Abort when job failed
+  fail:
+    msg: "ERR: Aborting because {{ task_description }} failed in the array. See the previous log from: https://{{ inventory_hostname }}:23451{{ job_init_result.json.self }}. --"
+  when: 
+  - not ansible_check_mode
+  - job_result.json.state != "Succeeded"
+

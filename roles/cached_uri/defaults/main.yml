@@ -1,0 +1,4 @@
+---
+
+cache_dir: ~/automation-cache
+cache_ttl: 86400 # in seconds

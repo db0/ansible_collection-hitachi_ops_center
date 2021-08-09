@@ -1,0 +1,16 @@
+---
+
+# Initiator for the returned list.
+arrays_zoned: []
+# In case a LUN request is for a RAC third quorum disk that has to reside on a different array than the standard pair
+# of other LUNS, then set this to true. In that case, the dictionary ARRAYS_FOR_RAC_THIRD_VOTING_DISKS
+# has to also be defined.
+IS_THIRD_VOTING_DISK: false
+# The amount of arrays in which to find this name zoned. 
+# Once this amount of arrays with zoning for this name are found, further arrays will be skipped.
+# Should be typically 2 for Mirrored LUNs and 1 for Non-Mirrored LUNs.
+expected_zoning_count: 2
+# The base URL for the REST API of the hitachi_ops_manager. 
+base_uri: "https://{{ inventory_hostname }}:23451/ConfigurationManager/v1/objects/storages"
+service_uri: "https://{{ inventory_hostname }}:23451/ConfigurationManager/v1"
+NON_PAIRED_ARRAYS: []

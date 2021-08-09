@@ -1,0 +1,39 @@
+---
+
+# helps keep an existing session from HSC alive more than 5 minutes by sending an API call to retrieve the current
+# session info
+# It requires the following variables to be set in the environment
+# * ARRAY: The array ID to connect to via the configuration manager
+# * SESSION: The session ID to keep alive
+# * TOKEN: The authentication token for that session
+
+- hosts: all
+  gather_facts: no
+
+  vars:
+    base_uri: "https://{{ inventory_hostname }}:23451/ConfigurationManager/v1/objects/storages"
+
+  tasks:
+
+  - name: Keep existing session alive
+    uri:
+      timeout: 150
+      validate_certs: no
+      force_basic_auth: yes
+      url: "{{ base_uri }}/{{ lookup('env', 'ARRAY') }}/sessions/{{ lookup('env', 'SESSION') }}"
+      body_format: json
+      headers:
+        Authorization: "Session {{ lookup('env', 'TOKEN') }}"
+        Content-Length: 0
+    register: session_keepalive
+    check_mode: no
+    ignore_errors: true
+
+  - name: Write keepalive log to file for debugging purposes
+    lineinfile:
+      path: keepalive.log
+      line: "{{lookup('pipe','date +%Y%m%d%H%M%S')}}: {{ session_keepalive }}"
+      create: true
+    check_mode: no
+    delegate_to: localhost
+    when: a_verbosity | int >= 1

@@ -1,0 +1,247 @@
+---
+
+# We use this bool to mark when we discover the needed hostgroup in this array
+# If this is set, we do some extra checks at the end which have required variables.
+- name: Initiate vars for {{ srn }}
+  set_fact:
+    hostgroup_found: false
+    token: false
+
+
+# We get one session token for all the operations in the same array.
+- name: Get session token
+  uri:
+    url: "{{ base_uri }}/{{ array_id }}/sessions"
+    user: "{{ HUSER }}"
+    password: "{{ HPASS }}"
+    method: POST
+    validate_certs: no
+    force_basic_auth: yes
+  register: authorization
+  check_mode: no
+  until: authorization is success
+  retries: 3
+  delay: 1
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - remote_pair is undefined or remote_pair == array_id
+
+
+# We set it in an easy-to-remember variable
+- name: Set session token
+  set_fact:
+    token: "{{ authorization.json.token }}"
+    session_id: "{{ authorization.json.sessionId }}"
+  # no_log: True
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - remote_pair is undefined or remote_pair == array_id
+
+
+# We use the hostgroups to check if the cluster/host we're looking for is zoned in the current array.
+- name: Gather host-groups
+  include_role:
+    name: db0.hitachi_ops_center.cached_uri
+  vars:
+    full_uri: "{{ base_uri }}/{{ array_id }}/host-groups"
+    uri_auth_token: "{{ token }}"
+    register_name: host_groups
+    timeout: 300
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - remote_pair is undefined or remote_pair == array_id
+
+
+- name: Abort when IS_GAD mismatches between arrays
+  fail:
+    msg: "ERR: Aborting because cluster appears zoned as GAD in one array, and as non-GAD in another! Please check zoning! --"
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - IS_GAD is defined
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - host_groups.json.data | db0.hitachi_ops_center.check_if_GAD(NAME) != IS_GAD
+
+
+# We need to determine if a cluster is GAD based on its zoning setup
+# We use this knowledge to later provision the LUNS in the proper manner.
+- name: Set request GAD state according to discovery
+  set_fact:
+    IS_GAD: "{{ host_groups.json.data | db0.hitachi_ops_center.check_if_GAD(NAME) }}"
+    ensure_unlocked: "{{ host_groups.json.data | db0.hitachi_ops_center.check_if_GAD(NAME) }}"
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+
+
+- name: Get array name
+  include_role:
+    name: db0.hitachi_ops_center.cached_uri
+  vars:
+    full_uri: "{{ base_uri }}/{{ array_id }}/storage-summaries/instance"
+    uri_auth_token: "{{ token }}"
+    register_name: instance_details
+    timeout: 300
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - remote_pair is undefined or remote_pair == array_id
+
+
+# We only need the Resource Group list is we're doing a GAD request
+- name: Get resource groups
+  include_role:
+    name: db0.hitachi_ops_center.cached_uri
+  vars:
+    full_uri: "{{ base_uri }}/{{ array_id }}/resource-groups?attributes=hostGroupIds"
+    uri_auth_token: "{{ token }}"
+    register_name: resource_groups
+    timeout: 150
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - remote_pair is undefined or remote_pair == array_id
+
+
+# For GAD, we only need the virtual resource group ID.
+- name: Get Virtual Resource Group
+  set_fact:
+    vrg: "{{ vrg_item.resourceGroupId }}"
+  loop: "{{ resource_groups.json.data }}"
+  loop_control:
+    loop_var: vrg_item
+    label: "{{ vrg_item.resourceGroupName }}"
+  when:
+  - remote_pair is undefined or remote_pair == array_id
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - IS_GAD | default(false) | bool
+  - '"Pool" in vrg_item.resourceGroupName or "GAD" in vrg_item.resourceGroupName'
+
+
+- name: Abort when VSM Resource Group could not be determined.
+  fail:
+    msg: "ERR: Aborting because VSM Resource Group could not be determined for GAD request. --"
+  when:
+  - IS_GAD | default(false) | bool
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - vrg is undefined
+
+
+# This is used to avoid looking up all arrays when we discovered both arrays in a pair
+- name: Get remote pair
+  include_role:
+    name: db0.hitachi_ops_center.cached_uri
+  vars:
+    full_uri: "{{ base_uri }}/{{ array_id }}/remote-storages"
+    uri_auth_token: "{{ token }}"
+    register_name: remote_storages
+    timeout: 150
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - remote_pair is undefined or remote_pair == array_id
+
+
+- name: Set remote pair
+  set_fact:
+    remote_pair: "{{ remotes_item.storageDeviceId }}"
+  loop: "{{ remote_storages.json.data }}"
+  loop_control:
+    loop_var: remotes_item
+    label: "{{ remotes_item.storageDeviceId }}"
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  - remotes_item.dkcType == "Remote"
+  - remote_pair is undefined or remote_pair == array_id
+
+
+- name: Aborting when mismatch on hostgroup names
+  fail:
+    msg: "ERR: Discovered hostgroup name mismatch. Aborting! --"
+  when: 
+  - not host_groups.json.data | db0.hitachi_ops_center.get_host_group_name(NAME)
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+
+
+# We create a dictionary for each array, with all details needed to perform further operations in it.
+- name: Set details of correct Array ({{ srn }})
+  set_fact:
+    # We use this variable to know if we should do further tests
+    hostgroup_found: true
+    array_entry:
+      storage_array: "{{ array_id }}"
+      serial_number: "{{ srn }}"
+      host_group_ids: "{{ host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) }}"
+      canonical_hg_name: "{{ host_groups.json.data | db0.hitachi_ops_center.get_host_group_name(NAME) }}"
+      existing_token: "{{ token }}"
+      session_id: "{{ session_id }}"
+      host_groups: "{{ host_groups.json.data }}"
+      name: "{{ instance_details.json.name }}"
+      resource_group: "{{ resource_groups.json.data | db0.hitachi_ops_center.get_resource_group_id(host_groups.json.data, NAME) }}"
+      vsm: "{{ vrg | default(omit) }}"
+      remote_pair: "{{ remote_pair | default(omit) }}"
+  when:
+  - arrays_zoned | length < expected_zoning_count
+  - host_groups.json.data | db0.hitachi_ops_center.get_host_group_id(NAME) | length >= 1
+  # Host arrays are not in a pair
+  - remote_pair is defined
+    or srn | int in NON_PAIRED_ARRAYS
+
+
+- name: Display matching array details
+  debug:
+    msg:
+    - "Hostgroup found! Array Details:"
+    - "Array Name: {{ array_entry.name }}"
+    - "Array ID: {{ array_entry.storage_array }}"
+    - "Array S/N: {{ array_entry.serial_number }}"
+    - "Hostgroup IDs: {{ array_entry.host_group_ids }}"
+    - "Resource Group: {{ array_entry.resource_group }}"
+    - "Canonical HG Name: {{ array_entry.canonical_hg_name }}"
+    - "GAD: {{ IS_GAD | default(false) }}"
+  when:
+  - hostgroup_found | bool
+
+
+- name:  Ensure session stays alive until play ends.
+  include_role:
+    name: db0.hitachi_ops_center.keep_alive
+  vars:
+    # These two don't need to be passed explicitly since it's already set globally in this loop.
+    # array_id: "{{ array_id }}"
+    # session_id: "{{ session_id }}"
+    auth_token: "{{ token }}"
+  when:
+  - hostgroup_found | bool
+
+
+- name: Close unneeded session
+  uri:
+    timeout: 150
+    validate_certs: no
+    force_basic_auth: yes
+    url: "{{ base_uri }}/{{ array_id }}/sessions/{{ session_id }}"
+    method: DELETE
+    body_format: json
+    headers:
+      Authorization: "Session {{ token }}"
+    body:
+      force: false
+  register: session_kill
+  check_mode: no
+  until: session_kill is success
+  retries: 3
+  delay: 1
+  when:
+  - not hostgroup_found | bool
+  - token
+
+# We create a list with all the arrays the requester cluster/host is zoned in
+# Then later we can simply loop only through those arrays.
+- name: Add to array list
+  set_fact:
+    arrays_zoned: "{{ arrays_zoned + [array_entry] }}"
+  when:
+  - hostgroup_found | bool

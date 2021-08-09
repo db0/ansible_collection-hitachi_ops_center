@@ -1,0 +1,61 @@
+---
+
+- name: Ensure cache directory exists
+  file:
+    path: "{{ cache_dir }}"
+    state: directory
+    mode: '0755'
+  check_mode: no
+
+- name: Get status of cache
+  stat:
+    path: "{{ cache_dir }}/{{ full_uri | replace('/','_') }}"
+  register: stat_results
+
+- name: Retrieve fresh content when cache invalid
+  block:
+  - name: Get fresh content
+    uri:
+      timeout: "{{ timeout | default(omit) }}"
+      validate_certs: no
+      force_basic_auth: yes
+      url: "{{ full_uri }}"
+      body_format: json
+      headers:
+        Authorization: "Session {{ uri_auth_token }}"
+        Remote-Authorization: "Session {{ uri_remote_auth_token | default(omit) }}"
+        # The default value sent by ansible apparently causes G700 arrays to abort.
+        # but sending 0 works
+        Content-Length: 0
+    register: uri_result
+    check_mode: no
+    until: uri_result is success
+    retries: 3
+    delay: 1
+  - name: Write cache
+    copy:
+      dest: "{{ cache_dir }}/{{ full_uri | replace('/','_') }}"
+      content: "{{ uri_result | to_nice_yaml }}"
+    check_mode: no
+  - name: Ensure cache ttl is updated
+    file:
+      path:  "{{ cache_dir }}/{{ full_uri | replace('/','_') }}"
+      state: touch
+    check_mode: no
+  - name: Set requested fact
+    set_fact:
+      "{{ register_name }}": "{{ uri_result }}"
+  when: not stat_results.stat.exists or (ansible_date_time.epoch|int - stat_results.stat.mtime) > cache_ttl
+
+- name: Retrieve cache when content valid
+  block: 
+  - name: Read facts from cache
+    slurp:
+      src: "{{ cache_dir }}/{{ full_uri | replace('/','_') }}" 
+    register: cached_result 
+  - name: Set requested fact from cache
+    set_fact:  
+      "{{ register_name }}": "{{ cached_result['content'] | b64decode | from_yaml }}"
+  when: 
+  - stat_results.stat.exists
+  - (ansible_date_time.epoch|int - stat_results.stat.mtime) <= cache_ttl
